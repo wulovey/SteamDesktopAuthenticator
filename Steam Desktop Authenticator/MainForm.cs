@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Diagnostics;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using SteamAuth;
 using System.Collections.Generic;
@@ -133,19 +132,8 @@ namespace Steam_Desktop_Authenticator
             btnTradeConfirmations.Text = "Loading...";
             btnTradeConfirmations.Text = oText;
 
-            try
-            {
-                ConfirmationFormWeb confirms = new ConfirmationFormWeb(currentAccount);
-                confirms.Show();
-            }
-            catch (Exception)
-            {
-                DialogResult res = MessageBox.Show("You are missing a dependency required to view your trade confirmations.\nWould you like to install it now?", "Trade confirmations failed to open", MessageBoxButtons.YesNo);
-                if (res == DialogResult.Yes)
-                {
-                    new InstallRedistribForm(true).ShowDialog();
-                }
-            }
+            ConfirmationFormWeb confirms = new ConfirmationFormWeb(currentAccount);
+            confirms.Show();
         }
 
         private void btnManageEncryption_Click(object sender, EventArgs e)
@@ -272,11 +260,32 @@ namespace Steam_Desktop_Authenticator
             loadSettings();
         }
 
-        private void menuDeactivateAuthenticator_Click(object sender, EventArgs e)
+        private async void menuDeactivateAuthenticator_Click(object sender, EventArgs e)
         {
             if (currentAccount == null) return;
 
-            DialogResult res = MessageBox.Show("Would you like to remove Steam Guard completely?\nYes - Remove Steam Guard completely.\nNo - Switch back to Email authentication.", "Remove Steam Guard", MessageBoxButtons.YesNoCancel);
+            // Check for a valid refresh token first
+            if (currentAccount.Session.IsRefreshTokenExpired())
+            {
+                MessageBox.Show("Your session has expired. Use the login again button under the selected account menu.", "Deactivate Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Check for a valid access token, refresh it if needed
+            if (currentAccount.Session.IsAccessTokenExpired())
+            {
+                try
+                {
+                    await currentAccount.Session.RefreshAccessToken();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Deactivate Authenticator Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            }
+
+            DialogResult res = MessageBox.Show("Would you like to remove Steam Guard completely?\nYes - Remove Steam Guard completely.\nNo - Switch back to Email authentication.", "Deactivate Authenticator: " + currentAccount.AccountName, MessageBoxButtons.YesNoCancel);
             int scheme = 0;
             if (res == DialogResult.Yes)
             {
@@ -309,7 +318,7 @@ namespace Steam_Desktop_Authenticator
                     return;
                 }
 
-                bool success = currentAccount.DeactivateAuthenticator(scheme);
+                bool success = await currentAccount.DeactivateAuthenticator(scheme);
                 if (success)
                 {
                     MessageBox.Show(String.Format("Steam Guard {0}. maFile will be deleted after hitting okay. If you need to make a backup, now's the time.", (scheme == 2 ? "removed completely" : "switched to emails")));
@@ -434,13 +443,37 @@ namespace Steam_Desktop_Authenticator
 
                 foreach (var acc in accs)
                 {
+                    // Check for a valid refresh token first
+                    if (acc.Session.IsRefreshTokenExpired())
+                    {
+                        MessageBox.Show("Your session for account " + acc.AccountName + " has expired. You will be prompted to login again.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        PromptRefreshLogin(acc);
+                        break;
+                    }
+
+                    // Check for a valid access token, refresh it if needed
+                    if (acc.Session.IsAccessTokenExpired())
+                    {
+                        try
+                        {
+                            lblStatus.Text = "Refreshing session...";
+                            await acc.Session.RefreshAccessToken();
+                            lblStatus.Text = "Checking confirmations...";
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            break;
+                        }
+                    }
+
                     try
                     {
                         Confirmation[] tmp = await acc.FetchConfirmationsAsync();
                         foreach (var conf in tmp)
                         {
-                            if ((conf.ConfType == Confirmation.ConfirmationType.MarketSellTransaction && manifest.AutoConfirmMarketTransactions) ||
-                                (conf.ConfType == Confirmation.ConfirmationType.Trade && manifest.AutoConfirmTrades))
+                            if ((conf.ConfType == Confirmation.EMobileConfirmationType.MarketListing && manifest.AutoConfirmMarketTransactions) ||
+                                (conf.ConfType == Confirmation.EMobileConfirmationType.Trade && manifest.AutoConfirmTrades))
                             {
                                 if (!autoAcceptConfirmations.ContainsKey(acc))
                                     autoAcceptConfirmations[acc] = new List<Confirmation>();
@@ -450,19 +483,7 @@ namespace Steam_Desktop_Authenticator
                                 confs.Add(conf);
                         }
                     }
-                    catch (SteamGuardAccount.WGTokenInvalidException)
-                    {
-                        //Prompt to relogin
-                        PromptRefreshLogin(acc);
-                        break;
-                    }
-                    catch (SteamGuardAccount.WGTokenExpiredException)
-                    {
-                        //Prompt to relogin
-                        PromptRefreshLogin(acc);
-                        break; //Don't bombard a user with login refresh requests if they have multiple accounts. Give them a few seconds to disable the autocheck option if they want.
-                    }
-                    catch (WebException)
+                    catch (Exception)
                     {
 
                     }
@@ -480,7 +501,7 @@ namespace Steam_Desktop_Authenticator
                     foreach (var acc in autoAcceptConfirmations.Keys)
                     {
                         var confirmations = autoAcceptConfirmations[acc].ToArray();
-                        acc.AcceptMultipleConfirmations(confirmations);
+                        await acc.AcceptMultipleConfirmations(confirmations);
                     }
                 }
             }
